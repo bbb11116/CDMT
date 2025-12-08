@@ -35,7 +35,7 @@ class TaskAlignedAssigner(nn.Module):
         self.eps = eps
 
     @torch.no_grad()
-    def forward(self,  pd_circles, anc_points, gt_labels, gt_circles, mask_gt):
+    def forward(self,  pd_circles, anc_points, gt_circles, mask_gt):
         """Compute the task-aligned assignment.
 
         Args:
@@ -66,16 +66,16 @@ class TaskAlignedAssigner(nn.Module):
             )
 
         try:
-            return self._forward(pd_circles, anc_points, gt_labels, gt_circles, mask_gt)
+            return self._forward(pd_circles, anc_points, gt_circles, mask_gt)
         except torch.cuda.OutOfMemoryError:
             # Move tensors to CPU, compute, then move back to original device
             #LOGGER.warning("CUDA OutOfMemoryError in TaskAlignedAssigner, using CPU")
-            cpu_tensors = [t.cpu() for t in (pd_circles, anc_points, gt_labels, gt_circles, mask_gt)]
+            cpu_tensors = [t.cpu() for t in (pd_circles, anc_points, gt_circles, mask_gt)]
             result = self._forward(*cpu_tensors)
             return tuple(t.to(device) for t in result)
 
 
-    def _forward(self, pd_circles, anc_points, gt_labels, gt_circles, mask_gt):
+    def _forward(self, pd_circles, anc_points, gt_circles, mask_gt):
         """Compute the task-aligned assignment.
 
         Args:
@@ -94,7 +94,7 @@ class TaskAlignedAssigner(nn.Module):
             target_gt_idx (torch.Tensor): Target ground truth indices with shape (bs, num_total_anchors).
         """
         mask_pos, align_metric, overlaps, distence= self.get_pos_mask(
-            pd_circles, gt_labels, gt_circles, anc_points, mask_gt
+            pd_circles, gt_circles, anc_points, mask_gt
         )  # mask_pos 与真实框匹配的topk个先验框的mask，形状为(bs, max_num_obj, h*w)；
         # align_metric 为真实框与先验框的对齐度量，形状为(bs, max_num_obj, h*w)；
         # overlaps 为预测框与真实框的iou，形状为(bs, max_num_obj, h*w)；
@@ -121,7 +121,7 @@ class TaskAlignedAssigner(nn.Module):
 
 
 
-    def get_pos_mask(self, pd_circles, gt_labels, gt_circles, anc_points, mask_gt):
+    def get_pos_mask(self, pd_circles, gt_circles, anc_points, mask_gt):
         """Get positive mask for each ground truth circle.
 
         Args:
@@ -139,7 +139,7 @@ class TaskAlignedAssigner(nn.Module):
         """
         mask_in_gts = self.select_candidates_in_gts(anc_points, gt_circles)  # 找出真实框内的锚点（掩码）（8, max_objects, 2550000）
         # Get anchor_align metric, (b, max_num_obj, h*w)
-        align_metric, overlaps, distence = self.get_box_metrics(pd_circles, gt_labels, gt_circles, mask_in_gts * mask_gt)
+        align_metric, overlaps, distence = self.get_box_metrics(pd_circles, gt_circles, mask_in_gts * mask_gt)
         # Get topk_metric mask, (b, max_num_obj, h*w)
         mask_topk = self.select_topk_candidates(align_metric, topk_mask=mask_gt.expand(-1, -1, self.topk).bool())
         mask_pos = mask_topk * mask_in_gts * mask_gt
@@ -148,7 +148,7 @@ class TaskAlignedAssigner(nn.Module):
 
 
 
-    def get_box_metrics(self, pd_circles, gt_labels, gt_circles, mask_gt):
+    def get_box_metrics(self, pd_circles, gt_circles, mask_gt):
         """Compute alignment metric given predicted and ground truth circles.根据预测和真实的圆计算对齐度量
 
         Args:
@@ -168,9 +168,9 @@ class TaskAlignedAssigner(nn.Module):
         distence = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_circles.dtype, device=pd_circles.device)
         #circles_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)#预测框得分[bs,max_objects,2550000]
 
-        ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)  # 2, b, max_num_obj
-        ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj（表示批次索引）
-        ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj（表示真实框的类别）
+        # ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)  # 2, b, max_num_obj
+        # ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj（表示批次索引）
+        # ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj（表示真实框的类别）
         # Get the scores of each grid for each gt cls
         #circles_scores[mask_gt] = pd_scores[ind[0], :, ind[1]][mask_gt]  # b, max_num_obj, h*w
 
@@ -368,7 +368,6 @@ def circle_ious(gt_circles: torch.Tensor, pd_circles: torch.Tensor) -> torch.Ten
     return iou  # shape: (M,)
 
 def circle_intersection_area_tensor(c0, r0, c1, r1):
-    """（同前，已优化到效率天花板）"""
     d = torch.linalg.norm(c0 - c1, dim=-1)
     no_inter = d >= r0 + r1
     contained = d <= torch.abs(r0 - r1)
@@ -386,7 +385,6 @@ def circle_intersection_area_tensor(c0, r0, c1, r1):
     if not mask.any():
         return area
 
-    # 精准切片
     dm, r0m, r1m = d[mask], r0[mask], r1[mask]
 
     # 防浮点误差
@@ -405,13 +403,6 @@ def circle_intersection_area_tensor(c0, r0, c1, r1):
     area[mask] = area_m
 
     return area
-
-
-import torch
-
-import torch
-
-import torch
 
 
 def make_anchor(feats, stride, grid_cell_offset=0.5):

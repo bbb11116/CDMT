@@ -20,19 +20,45 @@ def regression_loss(inputs, targets):
 
 
 def bdcn_loss2(inputs, targets, l_weight=1.1):
-    # bdcn loss modified in DexiNed
+    """
+    BDCN-style weighted BCE loss using BCEWithLogitsLoss (numerically stable).
+    - inputs: raw logits (shape: [B, C, H, W], typically C=1)
+    - targets: binary mask in {0, 1} or float in [0,1] (same shape as inputs)
+    - l_weight: scalar multiplier for final loss
+    """
+    targets = targets.float()
+    inputs = inputs.float()
 
-    targets = targets.long()
-    mask = targets.float()
-    num_positive = torch.sum((mask > 0.0).float()).float() # >0.1
-    num_negative = torch.sum((mask <= 0.0).float()).float() # <= 0.1
+    # Compute class balance weights (same as before)
+    pos_mask = targets > 0.0
+    neg_mask = ~pos_mask
 
-    mask[mask > 0.] = 1.0 * num_negative / (num_positive + num_negative) #0.1
-    mask[mask <= 0.] = 1.1 * num_positive / (num_positive + num_negative)  # before mask[mask <= 0.1]
-    inputs= torch.sigmoid(inputs)
-    cost = torch.nn.BCELoss(mask, reduction='none')(inputs, targets.float())
-    cost = torch.sum(cost.float().mean((1, 2, 3))) # before sum
-    return l_weight*cost
+    num_pos = torch.sum(pos_mask).float()
+    num_neg = torch.sum(neg_mask).float()
+    total = num_pos + num_neg
+
+    if total == 0:
+        weight_pos = 1.0
+        weight_neg = 1.0
+    else:
+        weight_pos = num_neg / total
+        weight_neg = (num_pos / total) * 1.1
+
+    # Build weight map
+    weight_map = torch.zeros_like(targets)
+    weight_map[pos_mask] = weight_pos
+    weight_map[neg_mask] = weight_neg
+
+    # ✅ Use BCEWithLogitsLoss — no sigmoid needed!
+    loss = F.binary_cross_entropy_with_logits(
+        input=inputs,          # raw logits
+        target=targets,
+        weight=weight_map,
+        reduction='none'
+    )
+
+    loss = loss.mean(dim=(1, 2, 3)).sum()
+    return l_weight * loss
 
 # ------------ cats losses ----------
 
@@ -40,7 +66,7 @@ def bdrloss(prediction, label, radius,device='cpu'):
     '''
     The boundary tracing loss that handles the confusing pixels.
     '''
-
+    prediction = torch.clamp(prediction, 1e-7, 1 - 1e-7)
     filt = torch.ones(1, 1, 2*radius+1, 2*radius+1)
     filt.requires_grad = False
     filt = filt.to(device)
@@ -67,6 +93,7 @@ def textureloss(prediction, label, mask_radius, device='cpu'):
     '''
     The texture suppression loss that smooths the texture regions.
     '''
+    prediction = torch.clamp(prediction, 1e-7, 1 - 1e-7)
     filt1 = torch.ones(1, 1, 3, 3)
     filt1.requires_grad = False
     filt1 = filt1.to(device)
@@ -85,32 +112,81 @@ def textureloss(prediction, label, mask_radius, device='cpu'):
     return torch.sum(loss.float().mean((1, 2, 3)))
 
 
-def cats_loss(prediction, label, l_weight=[0.,0.], device='cpu'):
-    # tracingLoss
-
-    tex_factor,bdr_factor = l_weight
+def cats_loss(prediction, label, l_weight=[0., 0.], device='cpu'):
+    """
+    安全版 cats_loss：修复数值不稳定问题，添加全面保护
+    """
+    tex_factor, bdr_factor = l_weight
     balanced_w = 1.1
-    label = label.float()
-    prediction = prediction.float()
+
+    # 1. 强制类型转换 + 设备一致
+    label = label.float().to(device)
+    prediction = prediction.float().to(device)
+
+    # 2. 安全标签处理（关键！）
+    # 假设原始标签可能是 0/255 或 0/1，统一转换为 0/1
+    if label.max() > 1.0:
+        print(f"⚠️ Warning: Label values >1 detected ({label.min():.2f}-{label.max():.2f}), normalizing...")
+        label = (label > 0.5).float()  # 二值化
+    elif label.min() < 0:
+        print(f"⚠️ Warning: Negative label values detected ({label.min():.2f}), clipping to 0")
+        label = torch.clamp(label, 0.0, 1.0)
+
+    # 3. 权重计算（保持原始逻辑）
     with torch.no_grad():
         mask = label.clone()
 
+        # 处理可能的无效标签值（如 2.0）
+        valid_mask = (mask == 0) | (mask == 1)
+        if not valid_mask.all():
+            print(f"⚠️ Invalid label values detected! Mapping to nearest valid value...")
+            mask = torch.where(mask > 0.5, torch.ones_like(mask), torch.zeros_like(mask))
+
         num_positive = torch.sum((mask == 1).float()).float()
-        num_negative = torch.sum((mask == 0).float()).float()
+        num_negative = torch.sum((mask == 0).float()).float() + 1e-8  # 防除零
+
         beta = num_negative / (num_positive + num_negative)
-        mask[mask == 1] = beta
-        mask[mask == 0] = balanced_w * (1 - beta)
-        mask[mask == 2] = 0
-    prediction = torch.sigmoid(prediction)
+        mask = torch.where(mask == 1,
+                           torch.ones_like(mask) * beta,
+                           torch.ones_like(mask) * balanced_w * (1 - beta))
 
-    cost = torch.nn.functional.binary_cross_entropy(
-        prediction.float(), label.float(), weight=mask, reduction='none')
-    cost = torch.sum(cost.float().mean((1, 2, 3)))  # by me
-    label_w = (label != 0).float()
-    textcost = textureloss(prediction.float(), label_w.float(), mask_radius=4, device=device)
-    bdrcost = bdrloss(prediction.float(), label_w.float(), radius=4, device=device)
+    # 4. ✅ 关键修复：使用 BCEWithLogits 替代手动 sigmoid + BCE
+    # 移除 prediction = torch.sigmoid(prediction)
+    # 直接使用 logits 计算 BCE
+    bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+        input=prediction,
+        target=label,
+        weight=mask,
+        reduction='none'
+    )
 
-    return cost + bdr_factor * bdrcost + tex_factor * textcost
+    # 5. 安全聚合
+    cost = bce_loss.mean()  # 更稳定的聚合方式
+
+    # 6. 安全计算辅助损失
+    label_w = (label > 0.5).float()  # 严格二值化
+
+    # 对预测应用 sigmoid（仅用于辅助损失）
+    pred_probs = torch.sigmoid(prediction.detach())  # detach 防止梯度问题
+
+    # 添加保护：检查辅助损失输入
+    if torch.isnan(pred_probs).any() or torch.isinf(pred_probs).any():
+        print("🔥 Warning: NaN/Inf in pred_probs! Clipping values...")
+        pred_probs = torch.clamp(pred_probs, 1e-7, 1 - 1e-7)
+
+    textcost = textureloss(pred_probs, label_w, mask_radius=4, device=device)
+    bdrcost = bdrloss(pred_probs, label_w, radius=4, device=device)
+
+    # 7. 最终损失 + 梯度保护
+    total_loss = cost + bdr_factor * bdrcost + tex_factor * textcost
+
+    # 防 NaN 保护
+    if torch.isnan(total_loss).any() or torch.isinf(total_loss).any():
+        print(
+            f"🚨 NaN/Inf in total loss! cost={cost.item():.4f}, bdrcost={bdrcost.item():.4f}, textcost={textcost.item():.4f}")
+        total_loss = torch.tensor(1.0, device=device, requires_grad=True)  # 安全回退
+
+    return total_loss
 
 def Dice_loss(prediction, label, l_weight=[0], device='cpu'):
     smooth = 1e-5

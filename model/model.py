@@ -14,18 +14,6 @@ from utils.AF.Xsmish import Smish
 from utils.yolo_circleLoss import *
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 class Regression(nn.Module):
     def __init__(self, in_ch, out_ch):
         super(Regression, self).__init__()

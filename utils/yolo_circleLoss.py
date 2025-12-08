@@ -24,7 +24,7 @@ class YoloCircleLoss(nn.Module):
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor):
         """通过转换为张量格式并缩放坐标来预处理目标。"""
-        nl, ne = targets.shape  # nl: 标注数量, ne: 每个标注的维度数(3+1+1)
+        nl, ne = targets.shape  # nl: 标注数量, ne: 每个标注的维度数(3+1)
         if nl == 0:
             out = torch.zeros(batch_size, 0, ne - 1, device=self.device)
         else:
@@ -41,7 +41,7 @@ class YoloCircleLoss(nn.Module):
             circle_scale = torch.stack([W, H, diag])  # shape (3,)
 
             # 缩放 x, y, r
-            out[..., 1:4] = out[..., 1:4] * circle_scale  # 或 .mul(circle_scale)
+            out = out * circle_scale  # 或 .mul(circle_scale)
             # out[..., 1:4] = out[..., 1:4].mul_(scale_tensor)
         return out
 
@@ -69,10 +69,10 @@ class YoloCircleLoss(nn.Module):
         imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)  # (8,2550000,2), (8,2550000,1)
 
-        # Targets [这一个批次一共有多少个框，4]
-        targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["circles"]), 1)
+        # Targets [这一个批次一共有多少个框，3]
+        targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["circles"]), 1)
         targets = self.preprocess(targets, batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])  # (8, max_objects, 4)
-        gt_labels, gt_circles = targets.split((1, 3), 2)
+        gt_circles = targets
         mask_gt = gt_circles.sum(2, keepdim=True).gt_(0.0)
 
         # Pboxes
@@ -82,7 +82,6 @@ class YoloCircleLoss(nn.Module):
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
             (pred_circles.detach() * stride_tensor).type(gt_circles.dtype),
             anchor_points * stride_tensor,
-            gt_labels,
             gt_circles,
             mask_gt,
         )
@@ -101,10 +100,10 @@ class YoloCircleLoss(nn.Module):
                 fg_mask,
             )
 
-        loss[0] *= 0.9  # box gain
-        loss[1] *= 0.3  # dist gain
+        loss[0] *= 0.3  # circle gain
+        loss[1] *= 0.7  # dist gain
 
-        return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
+        return loss * batch_size, loss.detach()  # loss(box, dfl)
 
 
 class CircleLoss(nn.Module):

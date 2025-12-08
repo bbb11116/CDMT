@@ -1,5 +1,7 @@
-
 from __future__ import print_function
+import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
 
 import argparse
 import cv2
@@ -56,7 +58,7 @@ def train_one_epoch(epoch, dataloader, model, criterions, optimizer, device,
         #loss_3 = sum([criterion2(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight0)])
         loss_2 = criterion2(preds_list[-1], labels, l_weight0[-1], device)
         #loss_4 = sum([criterion3(preds, labels, lweight = l_w) for preds, l_w in zip(preds_list, l_weight0)])
-        loss = (loss_1 + loss_4 + loss_2*0.25)*9 + loss_5 * 2
+        loss = loss_1 + loss_4 + loss_2*0.25 + loss_5 * 3
 
 
         optimizer.zero_grad()   # 将梯度归零
@@ -141,7 +143,7 @@ def validate_one_epoch(criterions, dataloader, model, device, output_dir, arg=No
             # loss_3 = sum([criterion2(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight0)])
             loss_2 = criterion2(preds_list[-1], labels, l_weight0[-1], device)
             # loss_4 = sum([criterion3(preds, labels, lweight = l_w) for preds, l_w in zip(preds_list, l_weight0)])
-            loss = (loss_1 + loss_4 + loss_2*0.25)*9 + loss_5 * 2
+            loss = loss_1 + loss_4 + loss_2*0.25 + loss_5 * 3
             val_loss_avg.append(loss.item())
             # print('pred shape', preds[0].shape)
             # 将预测的结果图像存储到对应的文件中
@@ -248,7 +250,7 @@ def parse_args():
 
     parser.add_argument('--input_dir',        #训练数据路径
                         type=str,
-                        default=r'F:\Data\data_test',
+                        default=r'D:\chens\Data\data_test',
                         help='the path to the directory with the input data.')
     parser.add_argument('--json_train',  # 训练数据路径
                         type=str,
@@ -260,7 +262,7 @@ def parse_args():
                         help='the path to the json file.')
     parser.add_argument('--output_dir',    #训练结果路径
                         type=str,
-                        default='checkpoints/checkpoints_circle_NOCLS',
+                        default='checkpoints/checkpoints_circle_NOCLS2',
                         help='the path to output the results.')
     parser.add_argument('--train_data',
                         type=str,
@@ -558,15 +560,28 @@ def main(args):
         # print('Last learning rate> ', optimizer.param_groups[0]['lr'])
 
     # 绘制loss曲线
+
+    import matplotlib
+    matplotlib.use('Agg')  # 防止在服务器上出错
+    import matplotlib.pyplot as plt
+
+    # 绘制 loss 曲线
     plt.figure()
-    plt.title('loss during training')  # 标题
-    plt.plot(loss_history["epoch"], loss_history["train_loss"], label="train_loss") #color='darkorange'
+    plt.title('Loss during training')
+    plt.plot(loss_history["epoch"], loss_history["train_loss"], label="train_loss")
     plt.plot(val_loss_history["epoch"], val_loss_history["val_loss"], label="val_loss", color='darkorange')
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
     plt.legend()
-    plt.grid()
-    plt.show()
+    plt.grid(True)
+
+    # 先保存，再显示（如果需要）
     save_path = os.path.join(args.output_dir, 'loss_figure.png')
-    plt.savefig(save_path)
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')  # 高质量保存
+    print(f"Loss curve saved to {save_path}")
+
+    plt.show()  # 本地调试时可看到图
+    plt.close()  # 可选：释放内存
 
 
     num_param = count_parameters(model)

@@ -335,7 +335,7 @@ class BipedDataset(Dataset):
         img = np.array(img, dtype=np.float32)
 
         # 删减此处是否会有影响？2024.06.27
-        # img -= self.mean_bgr
+        img -= self.mean_bgr
 
         #  400 for BIPEd and 352 for BSDS check with 384
         crop_size = self.img_height if self.img_height == self.img_width else None  # 448# MDBD=480 BIPED=480/400 BSDS=352

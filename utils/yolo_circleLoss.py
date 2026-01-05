@@ -14,7 +14,7 @@ class YoloCircleLoss(nn.Module):
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.stride = [2, 4, 8]
         #self.reg_max = 16
-        self.nc = 80
+        self.nc = 1
         self.no = self.nc +2
         self.device = device
         #self.use_dfl = self.reg_max > 1
@@ -48,14 +48,17 @@ class YoloCircleLoss(nn.Module):
 
 
 
-    def clrcle_decode(self, anchor_points: torch.Tensor, pred_dist: torch.Tensor) -> torch.Tensor:
+    def clrcle_decode(self, anchor_points: torch.Tensor, pred_dist: torch.Tensor,stride_tensor) -> torch.Tensor:
         """Decode predicted object bounding box coordinates from anchor points and distribution."""
+        b, a, c = pred_dist.shape
+        pred_dist =pred_dist.view(b,a,c).softmax(dim=2)
+        #pred_dist = pred_dist.sigmoid()
         # if self.use_dfl:
         #     b, a, c = pred_dist.shape  # batch, anchors, channels
         #     pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
-        return dist2circle(pred_dist, anchor_points)
+        return dist2circle(pred_dist, anchor_points,stride_tensor)
 
 
     def __call__(self,  preds: list[torch.Tensor], batch: dict[str, torch.Tensor]):
@@ -78,12 +81,12 @@ class YoloCircleLoss(nn.Module):
         mask_gt = gt_circles.sum(2, keepdim=True).gt_(0.0)
 
         # Pboxes
-        pred_circles = self.clrcle_decode(anchor_points, pred_distri)  # xyr, (8, 2550000, 3)
+        pred_circles = self.clrcle_decode(anchor_points, pred_distri,stride_tensor)  # xyr, (8, 2550000, 3)
 
         _, target_circles, target_scores, fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
             pred_scores.detach().sigmoid(),
-            (pred_circles.detach() * stride_tensor).type(gt_circles.dtype),
+            (pred_circles.detach()).type(gt_circles.dtype),
             anchor_points * stride_tensor,
             gt_labels,
             gt_circles,
@@ -106,9 +109,9 @@ class YoloCircleLoss(nn.Module):
                 fg_mask,
             )
 
-        loss[0] *= 0.3  # box gain
-        loss[1] *= 0.7  # cls gain
-        loss[2] *= 0.3  # dfl gain
+        loss[0] *= 0.7  # box gain
+        loss[1] *= 0.3  # cls gain
+        loss[2] *= 0.7  # dfl gain
 
         return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
 

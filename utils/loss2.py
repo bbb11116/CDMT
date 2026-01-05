@@ -20,19 +20,29 @@ def regression_loss(inputs, targets):
 
 
 def bdcn_loss2(inputs, targets, l_weight=1.1):
-    # bdcn loss modified in DexiNed
-
+    """使用 BCEWithLogitsLoss 的优化版本 (推荐)"""
     targets = targets.long()
     mask = targets.float()
-    num_positive = torch.sum((mask > 0.0).float()).float() # >0.1
-    num_negative = torch.sum((mask <= 0.0).float()).float() # <= 0.1
 
-    mask[mask > 0.] = 1.0 * num_negative / (num_positive + num_negative) #0.1
-    mask[mask <= 0.] = 1.1 * num_positive / (num_positive + num_negative)  # before mask[mask <= 0.1]
-    inputs= torch.sigmoid(inputs)
-    cost = torch.nn.BCELoss(mask, reduction='none')(inputs, targets.float())
-    cost = torch.sum(cost.float().mean((1, 2, 3))) # before sum
-    return l_weight*cost
+    # 计算正负样本数量
+    num_positive = torch.sum((mask > 0.0).float()).float()
+    num_negative = torch.sum((mask <= 0.0).float()).float()
+    total = num_positive + num_negative + 1e-6  # 防除零
+
+    # 创建权重掩码
+    weight_mask = torch.ones_like(mask)
+    weight_mask[mask > 0.] = num_negative / total
+    weight_mask[mask <= 0.] = 1.1 * num_positive / total
+
+    # 使用 BCEWithLogitsLoss (自动处理 sigmoid + 数值稳定)
+    bce_loss = torch.nn.BCEWithLogitsLoss(reduction='none')
+    cost = bce_loss(inputs, targets.float())
+
+    # 应用权重掩码
+    cost = cost * weight_mask
+    cost = torch.sum(cost.float().mean((1, 2, 3)))
+
+    return l_weight * cost
 
 # ------------ cats losses ----------
 
@@ -62,7 +72,6 @@ def bdrloss(prediction, label, radius,device='cpu'):
     return torch.sum(cost.float().mean((1, 2, 3)))
 
 
-
 def textureloss(prediction, label, mask_radius, device='cpu'):
     '''
     The texture suppression loss that smooths the texture regions.
@@ -87,6 +96,7 @@ def textureloss(prediction, label, mask_radius, device='cpu'):
 
 def cats_loss(prediction, label, l_weight=[0.,0.], device='cpu'):
     # tracingLoss
+    label = torch.clamp(label, 0.0, 1.0)
 
     tex_factor,bdr_factor = l_weight
     balanced_w = 1.1
@@ -102,15 +112,14 @@ def cats_loss(prediction, label, l_weight=[0.,0.], device='cpu'):
         mask[mask == 0] = balanced_w * (1 - beta)
         mask[mask == 2] = 0
     prediction = torch.sigmoid(prediction)
-
-    cost = torch.nn.functional.binary_cross_entropy(
-        prediction.float(), label.float(), weight=mask, reduction='none')
-    cost = torch.sum(cost.float().mean((1, 2, 3)))  # by me
+    # cost = torch.nn.functional.binary_cross_entropy(
+    #     prediction.float(), label.float(), weight=mask, reduction='none')
+    # cost = torch.sum(cost.float().mean((1, 2, 3)))  # by me
     label_w = (label != 0).float()
     textcost = textureloss(prediction.float(), label_w.float(), mask_radius=4, device=device)
     bdrcost = bdrloss(prediction.float(), label_w.float(), radius=4, device=device)
 
-    return cost + bdr_factor * bdrcost + tex_factor * textcost
+    return  bdr_factor * bdrcost + tex_factor * textcost
 
 def Dice_loss(prediction, label, l_weight=[0], device='cpu'):
     smooth = 1e-5

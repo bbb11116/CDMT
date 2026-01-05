@@ -15,17 +15,6 @@ from utils.yolo_circleLoss import *
 
 
 
-
-
-
-
-
-
-
-
-
-
-
 class Regression(nn.Module):
     def __init__(self, in_ch, out_ch):
         super(Regression, self).__init__()
@@ -340,7 +329,7 @@ class LDC_side_lifting(nn.Module):
         # results = [out_1, out_2, out_3, out_4, out_5, out_6]
         results = [out_1, out_2, out_3, out_4]
         pre = [block_1, block_3, block_4]
-        clrcle_model = CustomDetect(nc=80, ch=[16, 64, 96]).to(x.device)
+        clrcle_model = CustomDetect(nc=1, ch=[16, 64, 96]).to(x.device)
         clrcle_results = clrcle_model(pre)
 
         # 将results中的每个结果保存为图像
@@ -355,7 +344,7 @@ class LDC_side_lifting(nn.Module):
 
 
 class CustomDetect(nn.Module):
-    def __init__(self, nc=80, ch=()):
+    def __init__(self, nc=1, ch=()):
         super().__init__()
         self.nc = nc  # 类别数: 80
         self.no = 2  # 你的特有偏移量: 2 (例如 dx, dy 或者 r, offset)
@@ -414,6 +403,7 @@ class PostProcess:
     def __init__(self, conf_thres=0.6, strides=[2, 4, 8]):
         self.conf_thres = conf_thres
         self.strides = strides  # 对应你的三层输出 stride
+        self.num_classes = 1
 
     def __call__(self, preds):
         """
@@ -433,13 +423,13 @@ class PostProcess:
             # 1. 维度变换: (B, 82, H, W) -> (B, H, W, 82)
             pred1 = pred.permute(0, 2, 3, 1)
             # 2. 分割通道: 前80是类别，后2是偏移量
-            cls_logits = pred1[..., :80]
-            offsets = pred1[..., 80:]
+            cls_logits = pred1[..., :self.num_classes]
+            offsets = pred1[..., self.num_classes:]
             # 3. 计算置信度 (Sigmoid)
             scores = cls_logits.sigmoid()
             anchor_points, stride_tensor = make_anchor(pred, stride, 0.5)
             yoloCircleLoss = YoloCircleLoss()
-            pred_circles = yoloCircleLoss.clrcle_decode(anchor_points, offsets.reshape(B, -1, 2)).reshape(B, H, W, 3)
+            pred_circles = yoloCircleLoss.clrcle_decode(anchor_points, offsets.reshape(B, -1, 2), stride_tensor).reshape(B, H, W, 3)
 
             # 6. 整合当前尺度的结果
             # 找到每个网格中分数最大的类别
@@ -476,7 +466,7 @@ class PostProcess:
         return output
 
 
-def standard_nms_with_fixed_size(detections, fixed_size=40, iou_thres=0.45):
+def standard_nms_with_fixed_size(detections, fixed_size=10, iou_thres=0.9):
     """
     detections: (N, 5) -> [x, y, r, score, class]
     fixed_size: 假定的目标大小
@@ -527,6 +517,7 @@ def standard_nms_with_fixed_size(detections, fixed_size=40, iou_thres=0.45):
 def final_results(PostProcess,output):
     if not output:
         return []
+    #output = [torch.sigmoid(o) for o in output]
     final_results = []
     postprocessor = PostProcess()
     detections = postprocessor(output)
@@ -538,7 +529,7 @@ def final_results(PostProcess,output):
 
         # 使用之前提到的伪造 Box NMS 策略
         # 输入: (Total_N, 5) -> 输出: (Keep_N, 5)
-        keep_dets = standard_nms_with_fixed_size(img_dets, fixed_size=40)
+        keep_dets = standard_nms_with_fixed_size(img_dets, fixed_size=20,iou_thres=0.95)
         final_results.append(keep_dets)
         return final_results
 

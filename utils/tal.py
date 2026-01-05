@@ -17,7 +17,7 @@ class TaskAlignedAssigner(nn.Module):
         eps (float): A small value to prevent division by zero.
     """
 
-    def __init__(self, topk: int = 13, num_classes: int = 80, alpha: float = 1.0, beta: float = 6.0, eps: float = 1e-9):
+    def __init__(self, topk: int = 13, num_classes: int = 1, alpha: float = 1.0, beta: float = 6.0, eps: float = 1e-9):
         """Initialize a TaskAlignedAssigner object with customizable hyperparameters.
 
         Args:
@@ -172,12 +172,21 @@ class TaskAlignedAssigner(nn.Module):
         distence = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_circles.dtype, device=pd_circles.device)
         circles_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)#预测框得分[bs,max_objects,2550000]
 
-        ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)  # 2, b, max_num_obj
-        ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj（表示批次索引）
-        ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj（表示真实框的类别）
-        # Get the scores of each grid for each gt cls
-        circles_scores[mask_gt] = pd_scores[ind[0], :, ind[1]][mask_gt]  # b, max_num_obj, h*w
+        # ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)  # 2, b, max_num_obj
+        # ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj（表示批次索引）
+        # ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj（表示真实框的类别）
+        # # Get the scores of each grid for each gt cls
+        # circles_scores[mask_gt] = pd_scores[ind[0], :, ind[1]][mask_gt]  # b, max_num_obj, h*w
+        # 因为 num_classes == 1，所有预测得分都属于同一类
+        pd_scores_squeezed = pd_scores.squeeze(-1)  # (B, N)
 
+        # circles_scores: (B, max_num_obj, N)
+        # 我们要把 pd_scores_squeezed (B, N) 扩展到每个 GT（max_num_obj 次）
+        # 方法：unsqueeze(1) -> (B, 1, N)，然后自动广播
+        circles_scores = pd_scores_squeezed.unsqueeze(1).expand(-1, self.n_max_boxes, -1)
+
+        # 注意：mask_gt 会自动筛选有效位置，所以上面可以直接赋值，无需复杂索引
+        # 如果你后续只用 circles_scores[mask_gt]，那这样完全等价且安全
         # (b, max_num_obj, 1, 4), (b, 1, h*w, 4)
         pd_circles = pd_circles.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)[mask_gt]#(bs,max_objects,2550000,3)*mask_gt->(bs*max_objects*2550000,3)
         gt_circles = gt_circles.unsqueeze(2).expand(-1, -1, na, -1)[mask_gt]#(bs,max_objects,2550000,3)*mask_gt->(bs*max_objects*2550000,3)
@@ -254,10 +263,14 @@ class TaskAlignedAssigner(nn.Module):
             (target_labels.shape[0], target_labels.shape[1], self.num_classes),
             dtype=torch.int64,
             device=target_labels.device,
-        )  # (b, h*w, 80)
-        target_scores.scatter_(2, target_labels.unsqueeze(-1), 1)
+        )  # (b, h*w, 1)
+        # target_scores.scatter_(2, target_labels.unsqueeze(-1), 1)
+        # 因为 num_classes == 1，正样本类别得分 = 1
 
-        fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)  # (b, h*w, 80)
+        target_scores[fg_mask.unsqueeze(-1).bool()] = 1.0
+
+
+        fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)  # (b, h*w, 1)
         target_scores = torch.where(fg_scores_mask > 0, target_scores, 0)
 
         return target_labels, target_circles, target_scores
@@ -451,21 +464,42 @@ def make_anchors(feats, strides, grid_cell_offset=0.5):
 
 
 
-def dist2circle(distance, anchor_points, dim=-1):
+# def dist2circle(distance, anchor_points, dim=-1):
+#     """Transform distance(ltrb) to box(xywh or xyxy)."""
+#     l, r = distance.chunk(2, dim)
+#     t = l
+#     b = r
+#     lt = torch.cat((l, t), dim)
+#     rb = torch.cat((r, b), dim)
+#     #print(rb.shape , anchor_points.shape)
+#     x1y1 = anchor_points - lt # (8, 2550000, 2)
+#     x2y2 = anchor_points + rb # (8, 2550000, 2)
+#     xy = (x1y1 + x2y2) / 2
+#     r = (x2y2 - x1y1) / 2 # (8, 2550000, 2)
+#     r = torch.mean(r, dim=-1, keepdim=True) # (8, 2550000, 1)
+#     #rec = torch.cat((x1y1, x2y2), dim)
+#
+#     return torch.cat((xy, r), dim)  # xyr circle
+
+def dist2circle(distance, anchor_points,stride_tensor, dim=-1):
     """Transform distance(ltrb) to box(xywh or xyxy)."""
+    ratio = 100.
     l, r = distance.chunk(2, dim)
+    # 确保预测值为正数且有意义
+    l = torch.abs(l) * ratio  # 缩放因子，根据图像尺寸调整
+    r = torch.abs(r) * ratio
     t = l
     b = r
     lt = torch.cat((l, t), dim)
     rb = torch.cat((r, b), dim)
     #print(rb.shape , anchor_points.shape)
+    anchor_points = anchor_points * stride_tensor
     x1y1 = anchor_points - lt # (8, 2550000, 2)
     x2y2 = anchor_points + rb # (8, 2550000, 2)
     xy = (x1y1 + x2y2) / 2
     r = (x2y2 - x1y1) / 2 # (8, 2550000, 2)
     r = torch.mean(r, dim=-1, keepdim=True) # (8, 2550000, 1)
+    r = torch.clamp(r, min=5.0)  # 最小半径5个像素
     #rec = torch.cat((x1y1, x2y2), dim)
 
     return torch.cat((xy, r), dim)  # xyr circle
-
-

@@ -30,7 +30,7 @@ class CircleDataset(Dataset):
 
         # 2. 获取圆的信息 [cx, cy, r]
         circles_data = img_info['circles']
-        circles_id = img_info['circles_id']
+        #circles_id = img_info['circles_id']
         circles = []
         for c in circles_data:
             circles.append([c['cx']/w, c['cy']/h, c['r']/torch.sqrt(w**2 + h**2)])
@@ -41,7 +41,7 @@ class CircleDataset(Dataset):
         if len(circles) > 0:
             circles = torch.tensor(circles, dtype=torch.float32)
             # 3. 创建类别 Tensor (所有圆都是同一个类别)
-            cls = torch.full((len(circles), 1), circles_id, dtype=torch.float32)
+            cls = torch.full((len(circles), 1), 1, dtype=torch.float32)
         else:
             circles = torch.zeros((0, 3), dtype=torch.float32)
             cls = torch.zeros((0, 1), dtype=torch.float32)

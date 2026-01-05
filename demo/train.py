@@ -1,9 +1,11 @@
-
 from __future__ import print_function
+import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
+
 
 import argparse
 import cv2
-import os
 import numpy as np
 import time, platform
 import matplotlib.pyplot as plt
@@ -44,7 +46,7 @@ def train_one_epoch(epoch, dataloader, model, criterions, optimizer, device,
         preds_list,circle_list = model(images)
         assert len(preds_list) == len(l_weight), "长度不匹配"
 
-        loss_4 = sum([criterion4(torch.sigmoid(preds), labels, l_w) for preds, l_w in zip(preds_list[:-1], l_weight0)])  # bdcn_loss2 [1,2,3] TEED
+        loss_4 = sum([criterion4(preds, labels, l_w) for preds, l_w in zip(preds_list, l_weight0)])  # bdcn_loss2 [1,2,3] TEED
         loss_1 = criterion1(preds_list[-1], labels, l_weight[-1], device)  # cats_loss [dfuse] TEED
         loss_5 = criterion5(preds = circle_list, batch = sample_batched)[0] # yolo_circleLoss [dfuse] TEED
         loss_5 = loss_5.mean()*0.0000001  # 或 .sum()
@@ -56,11 +58,12 @@ def train_one_epoch(epoch, dataloader, model, criterions, optimizer, device,
         #loss_3 = sum([criterion2(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight0)])
         loss_2 = criterion2(preds_list[-1], labels, l_weight0[-1], device)
         #loss_4 = sum([criterion3(preds, labels, lweight = l_w) for preds, l_w in zip(preds_list, l_weight0)])
-        loss = (loss_1 + loss_4 + loss_2*0.25)*5 + loss_5
+        loss = loss_1 + loss_4 * 2 + loss_2*0.25 + loss_5
 
 
         optimizer.zero_grad()   # 将梯度归零
         loss.backward()         # 反向传播计算每个参数的梯度值
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()        # 通过梯度下降来执行参数更新
         loss_avg.append(loss.item())
         if tb_writer is not None:
@@ -131,7 +134,7 @@ def validate_one_epoch(criterions, dataloader, model, device, output_dir, arg=No
             file_names = sample_batched['im_file']
             image_shape = sample_batched['shape']
             preds_list,circle_list = model(images)
-            loss_4 = sum([criterion4(torch.sigmoid(preds), labels, l_w) for preds, l_w in zip(preds_list[:-1], l_weight0)])  # bdcn_loss2 [1,2,3] TEED
+            loss_4 = sum([criterion4(preds, labels, l_w) for preds, l_w in zip(preds_list, l_weight0)])  # bdcn_loss2 [1,2,3] TEED
             loss_1 = criterion1(preds_list[-1], labels, l_weight[-1], device)  # cats_loss [dfuse] TEED
             loss_5 = criterion5(preds = circle_list, batch = sample_batched)[0]
             loss_5 = loss_5.mean()*0.0000001
@@ -141,7 +144,7 @@ def validate_one_epoch(criterions, dataloader, model, device, output_dir, arg=No
             # loss_3 = sum([criterion2(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight0)])
             loss_2 = criterion2(preds_list[-1], labels, l_weight0[-1], device)
             # loss_4 = sum([criterion3(preds, labels, lweight = l_w) for preds, l_w in zip(preds_list, l_weight0)])
-            loss = (loss_1 + loss_4 + loss_2*0.25)*5 + loss_5
+            loss =loss_1  +   loss_4  + loss_2*0.25 + loss_5
             val_loss_avg.append(loss.item())
             # print('pred shape', preds[0].shape)
             # 将预测的结果图像存储到对应的文件中
@@ -248,7 +251,7 @@ def parse_args():
 
     parser.add_argument('--input_dir',        #训练数据路径
                         type=str,
-                        default=r'F:\Data\data_test',
+                        default=r'D:\chens\Data\data_test',
                         help='the path to the directory with the input data.')
     parser.add_argument('--json_train',  # 训练数据路径
                         type=str,
@@ -260,7 +263,7 @@ def parse_args():
                         help='the path to the json file.')
     parser.add_argument('--output_dir',    #训练结果路径
                         type=str,
-                        default='checkpoints/checkpoints_circle',
+                        default='checkpoints/checkpoints_circle_5',
                         help='the path to output the results.')
     parser.add_argument('--train_data',
                         type=str,
@@ -316,16 +319,16 @@ def parse_args():
                         help='The NO B to wait before printing test predictions. 200')
     parser.add_argument('--epochs',
                         type=int,
-                        default=500,
+                        default=200,
                         metavar='N',
                         help='Number of training epochs (default: 25).')  # 训练总轮次
-    parser.add_argument('--lr', default=5e-5, type=float, #5e-5
-                        help='Initial learning rate. =5e-5') # 初始学习率
-    parser.add_argument('--lrs', default=[4e-5,2e-5,1e-5], type=float,
+    parser.add_argument('--lr', default=8e-4, type=float,  # 5e-5
+                        help='Initial learning rate. =5e-5')  # 初始学习率
+    parser.add_argument('--lrs', default=[4e-4, 2e-4, 5e-5], type=float,
                         help='LR for set epochs')
     parser.add_argument('--wd', type=float, default=0., metavar='WD',
                         help='weight decay (Good 5e-6)')
-    parser.add_argument('--adjust_lr', default=[100,300,400], type=int,
+    parser.add_argument('--adjust_lr', default=[20, 30, 40], type=int,
                         help='Learning rate step size.')  # [6,9,19] # 调整学习率的epoch节点
     parser.add_argument('--version_notes',
                         default='LDC-BIPED: B4 Exp 67L3 xavier init normal+ init normal CatsLoss2 Cofusion',
@@ -333,7 +336,7 @@ def parse_args():
                         help='version notes')
     parser.add_argument('--batch_size',
                         type=int,
-                        default=2,
+                        default=4,
                         metavar='B',
                         help='the mini-batch size (default: 8)')
     parser.add_argument('--workers',
@@ -392,11 +395,10 @@ def main(args):
         from torch.utils.tensorboard import SummaryWriter # for torch 1.4 or greather
         tb_writer = SummaryWriter(log_dir=training_dir)
         # saving training settings
-        training_notes =['LDC, Xavier Normal Init, LR= ' + str(args.lr) + ' WD= '
-                          + str(args.wd) + ' image size = ' + str(args.img_width)
+        training_notes =['LDC,LR= ' + str(args.lr) +
+                           ' image size = ' + str(args.img_width)
                           + ' adjust LR=' + str(args.adjust_lr) +' LRs= '
-                          + str(args.lrs)+' Loss Function= CAST-loss2.py '
-                          + str(time.asctime())+args.version_notes]
+                          + str(args.lrs)]
         info_txt = open(os.path.join(training_dir, 'training_settings.txt'), 'w')
         info_txt.write(str(training_notes))
         info_txt.close()
@@ -482,6 +484,13 @@ def main(args):
                            lr=args.lr,
                            weight_decay=args.wd)
 
+    # optimizer = torch.optim.SGD(
+    #     model.parameters(),
+    #     lr=1e-6,  # ← 关键！别用 1e-3
+    #       # ← 强烈建议开启
+    #     weight_decay=args.wd  # ← L2 正则，防止过拟合
+    # )
+
     # Count parameters:
     num_param = count_parameters(model)
     print('-------------------------------------------------------')
@@ -552,21 +561,47 @@ def main(args):
                                  epoch+1)
 
         #显示进度条
-        epochs_bar.set_postfix(loss=f"{val_loss:.4f}", last_learning_rate=f"{optimizer.param_groups[0]['lr']:.4f}")
+        epochs_bar.set_postfix(loss=f"{val_loss:.4f}", last_learning_rate=f"{optimizer.param_groups[0]['lr']:.8f}")
         #更新进度条（步进1）
         epochs_bar.update(1)
         # print('Last learning rate> ', optimizer.param_groups[0]['lr'])
+        if np.isnan(val_loss):
+            print("训练已完成")
+            break
 
-    # 绘制loss曲线
+    import matplotlib
+    matplotlib.use('Agg')  # 防止在服务器上出错
+    import matplotlib.pyplot as plt
+    from datetime import datetime
+
+    # 绘制 loss 曲线
     plt.figure()
-    plt.title('loss during training')  # 标题
-    plt.plot(loss_history["epoch"], loss_history["train_loss"], label="train_loss") #color='darkorange'
+    plt.title('Loss during training')
+    plt.plot(loss_history["epoch"], loss_history["train_loss"], label="train_loss")
     plt.plot(val_loss_history["epoch"], val_loss_history["val_loss"], label="val_loss", color='darkorange')
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
     plt.legend()
-    plt.grid()
-    plt.show()
+    plt.grid(True)
+
+    # 获取当前时间并格式化
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 在图上添加时间水印（例如右下角）
+    plt.text(0.99, 0.01, f'Time: {current_time}',
+             transform=plt.gca().transAxes,
+             fontsize=9,
+             verticalalignment='bottom',
+             horizontalalignment='right',
+             bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgray', alpha=0.7))
+
+    # 先保存，再显示（如果需要）
     save_path = os.path.join(args.output_dir, 'loss_figure.png')
-    plt.savefig(save_path)
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')  # 高质量保存
+    print(f"Loss curve saved to {save_path}")
+
+    plt.show()  # 本地调试时可看到图
+    plt.close()  # 可选：释放内存
 
 
     num_param = count_parameters(model)

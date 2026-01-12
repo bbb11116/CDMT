@@ -19,7 +19,7 @@ class YoloCircleLoss(nn.Module):
         self.device = device
         #self.use_dfl = self.reg_max > 1
 
-        self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
+        self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=3.0, beta=6.0)
         self.circle_loss = CircleLoss().to(device)
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor):
@@ -41,7 +41,7 @@ class YoloCircleLoss(nn.Module):
             circle_scale = torch.stack([W, H, diag])  # shape (3,)
 
             # 缩放 x, y, r
-            out[..., 1:4] = out[..., 1:4] * circle_scale  # 或 .mul(circle_scale)
+            out[..., 1:4] = out[..., 1:4]   # 或 .mul(circle_scale)
             #out[..., 1:4] = out[..., 1:4].mul_(scale_tensor)
         return out
 
@@ -50,8 +50,8 @@ class YoloCircleLoss(nn.Module):
 
     def clrcle_decode(self, anchor_points: torch.Tensor, pred_dist: torch.Tensor,stride_tensor) -> torch.Tensor:
         """Decode predicted object bounding box coordinates from anchor points and distribution."""
-        b, a, c = pred_dist.shape
-        pred_dist =pred_dist.view(b,a,c).softmax(dim=2)
+        # b, a, c = pred_dist.shape
+        # pred_dist =pred_dist.view(b,a,c).softmax(dim=2)
         #pred_dist = pred_dist.sigmoid()
         # if self.use_dfl:
         #     b, a, c = pred_dist.shape  # batch, anchors, channels
@@ -64,9 +64,9 @@ class YoloCircleLoss(nn.Module):
     def __call__(self,  preds: list[torch.Tensor], batch: dict[str, torch.Tensor]):
         loss = torch.zeros(3, device=self.device)  # box, cls, dfl
         feats = preds[1] if isinstance(preds, tuple) else preds
-        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
-            (2, self.nc), 1)  # (8, 80+2, 2550000)
-        pred_scores = pred_scores.permute(0, 2, 1).contiguous()  # (8, 2550000, 80)
+        pred_scores, pred_distri = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
+            (self.nc ,2), 1)  # (8,1+2, 2550000)
+        pred_scores = pred_scores.permute(0, 2, 1).contiguous()  # (8, 2550000,  1)
         pred_distri = pred_distri.permute(0, 2, 1).contiguous()  # (8, 2550000,  2)
 
         dtype = pred_scores.dtype
@@ -74,19 +74,20 @@ class YoloCircleLoss(nn.Module):
         imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)  # (8,2550000,2), (8,2550000,1)
 
-        # Targets [这一个批次一共有多少个框，2+1+nc]
+        # Targets [这一个批次一共有多少个框，1+1+3]
         targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["circles"]), 1)
+        print(targets.shape)
         targets = self.preprocess(targets, batch_size, scale_tensor=imgsz[[1, 0, 1, 0]]) # (8, max_objects, 4)
         gt_labels, gt_circles = targets.split((1, 3), 2)  # cls, xyr # (8, max_objects, 1), (8, max_objects, 3)
         mask_gt = gt_circles.sum(2, keepdim=True).gt_(0.0)
 
         # Pboxes
-        pred_circles = self.clrcle_decode(anchor_points, pred_distri,stride_tensor)  # xyr, (8, 2550000, 3)
+        pred_circles = self.clrcle_decode(anchor_points, pred_distri,stride_tensor)  # xyr, (8, 2550000, 3) 还原到原始坐标系
 
         _, target_circles, target_scores, fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
             pred_scores.detach().sigmoid(),
-            (pred_circles.detach()).type(gt_circles.dtype),
+            (pred_circles.detach()*stride_tensor).type(gt_circles.dtype),
             anchor_points * stride_tensor,
             gt_labels,
             gt_circles,
@@ -110,7 +111,7 @@ class YoloCircleLoss(nn.Module):
             )
 
         loss[0] *= 0.7  # box gain
-        loss[1] *= 0.3  # cls gain
+        loss[1] *= 0.7  # cls gain
         loss[2] *= 0.7  # dfl gain
 
         return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
@@ -137,8 +138,7 @@ class CircleLoss(nn.Module):
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
         iou = circle_ious(pred_bboxes[fg_mask], target_bboxes[fg_mask])
         distence = center_distanceLoss(pred_bboxes[fg_mask], target_bboxes[fg_mask])
-        loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
-        loss_dist = ((1.0 - distence) * weight).sum() / target_scores_sum
-
+        loss_iou = 1.0 - iou
+        loss_dist = 1.0 - distence
 
         return loss_iou, loss_dist

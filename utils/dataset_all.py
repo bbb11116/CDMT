@@ -112,7 +112,7 @@ class TestDataset(Dataset):
         circles_id = torch.tensor(circles_id_raw, dtype=torch.float32)
         circles = []
         for c in circles_data:
-            circles.append([c['cx'] / w, c['cy'] / h, c['r'] / torch.sqrt(w ** 2 + h ** 2)])
+            circles.append([c['cx'], c['cy'], c['r']])
 
         # 转为 Tensor，如果该图没有圆，则为空 Tensor
         if len(circles) > 0:
@@ -307,7 +307,7 @@ class BipedDataset(Dataset):
         circles_id = torch.tensor(circles_id_raw, dtype=torch.float32)
         circles = []
         for c in circles_data:
-            circles.append([c['cx'] / w, c['cy'] / h, c['r'] / torch.sqrt(w ** 2 + h ** 2)])
+            circles.append([c['cx'] , c['cy'] , c['r']])
 
         # 转为 Tensor，如果该图没有圆，则为空 Tensor
         if len(circles) > 0:

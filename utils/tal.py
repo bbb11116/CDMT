@@ -483,7 +483,7 @@ def make_anchors(feats, strides, grid_cell_offset=0.5):
 
 def dist2circle(distance, anchor_points,stride_tensor, dim=-1):
     """Transform distance(ltrb) to box(xywh or xyxy)."""
-    ratio = 100.
+    ratio = 1.
     l, r = distance.chunk(2, dim)
     # 确保预测值为正数且有意义
     l = torch.abs(l) * ratio  # 缩放因子，根据图像尺寸调整
@@ -493,13 +493,13 @@ def dist2circle(distance, anchor_points,stride_tensor, dim=-1):
     lt = torch.cat((l, t), dim)
     rb = torch.cat((r, b), dim)
     #print(rb.shape , anchor_points.shape)
-    anchor_points = anchor_points * stride_tensor
+    anchor_points = anchor_points
     x1y1 = anchor_points - lt # (8, 2550000, 2)
     x2y2 = anchor_points + rb # (8, 2550000, 2)
     xy = (x1y1 + x2y2) / 2
-    r = (x2y2 - x1y1) / 2 # (8, 2550000, 2)
-    r = torch.mean(r, dim=-1, keepdim=True) # (8, 2550000, 1)
-    r = torch.clamp(r, min=5.0)  # 最小半径5个像素
+    R = (x2y2 - x1y1) / 2 # (8, 2550000, 2)
+    R = torch.mean(R, dim=-1, keepdim=True) # (8, 2550000, 1)
+    #R = torch.clamp(R, min=2.0)  # 最小半径5个像素
     #rec = torch.cat((x1y1, x2y2), dim)
 
-    return torch.cat((xy, r), dim)  # xyr circle
+    return torch.cat((xy, R), dim)  # xyr circle

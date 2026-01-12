@@ -15,7 +15,6 @@ BIPED_mean = [114.510, 114.451,117.230,137.86]
 class TestDataset(Dataset):
     def __init__(self,
                  data_root,
-                 json_path,
                  test_data,
                  mean_bgr,
                  img_height,

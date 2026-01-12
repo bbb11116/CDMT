@@ -6,7 +6,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 from utils.dataset import TestDataset
 from utils.loss2 import *
-from model.modelB4_side_lifting_2 import LDC_side_lifting
+from model.model import LDC_side_lifting
 from utils.img_processing import (save_image_batch_to_disk)
 
 IS_LINUX = True if platform.system()=="Linux" else False
@@ -17,10 +17,10 @@ def parse_args():
 
     # Data parameters  "E:\CS\ys\0_data_YS\imgs\test"
     parser.add_argument('--model_path', type=str,
-                        default=r'D:\chens\project\CS_LDC\demo\checkpoints\checkpoints_6.15\BRIND\29\29_model.pth',
+                        default=r'D:\chens\project\LDC_SED\checkpoints\checkpoints_circle_3\data_test\199\199_model.pth',
                         help='模型文件路径')
     parser.add_argument('--test_dir', type=str,
-                        default=r"F:\data_all",
+                        default=r"D:\chens\Data\data_test\imgs\train\real",
                         #required=True,
                         help='测试图像目录')
     parser.add_argument('--height', type=int,
@@ -29,7 +29,7 @@ def parse_args():
                         default=1600, help='测试图像宽度')
     parser.add_argument('--output_dir',
                         type=str,
-                        default=r"F:\data_all_result_6.15",
+                        default=r"E:\data_SED_result",
                         help='the path to output the results.')
     parser.add_argument('--is_testing',type=bool,
                         default=True,
@@ -38,6 +38,10 @@ def parse_args():
                         type=bool,
                         default=False,
                         help='True: Generate all LDC outputs in all_edges ')
+    parser.add_argument('--circle',
+                        type=bool,
+                        default=False,
+                        help='True: 将圆画在图上')
     parser.add_argument('--resume',
                         type=bool,
                         default=False,
@@ -111,6 +115,7 @@ def main(args):
     test(checkpoint_path, dataloader_test, model, device, output_dir, args)
 
 def test(checkpoint_path, dataloader, model, device, output_dir, args):
+    circle_list = None
     if not os.path.isfile(checkpoint_path):
         raise FileNotFoundError(
             f"Checkpoint filte note found: {checkpoint_path}")
@@ -131,12 +136,13 @@ def test(checkpoint_path, dataloader, model, device, output_dir, args):
             end = time.perf_counter()
             if device.type == 'cuda':
                 torch.cuda.synchronize()    # 确保前一cuda操作的结果已经准备好，避免存在数据竞争和错误
-            preds = model(images)
+            preds, circle_list = model(images)
             if device.type == 'cuda':
                 torch.cuda.synchronize()
             tmp_duration = time.perf_counter() - end
             total_duration.append(tmp_duration)
             save_image_batch_to_disk(preds,
+                                     circle_list,
                                      output_dir,
                                      file_names,
                                      image_shape,

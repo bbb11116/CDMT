@@ -217,13 +217,197 @@ class SideHaarBlock(nn.Module):
 
 
 
+#******************************************************
+
+
+
+
+
+
+
+
+class SpatialGather_Module(nn.Module):
+    def __init__(self, cls_num=21):
+        super(SpatialGather_Module, self).__init__()
+        self.cls_num = cls_num
+
+    def forward(self, feats, probs):
+        probs = F.interpolate(probs, size=feats.shape[-2:], mode='bilinear', align_corners=True)  # b,21,h/2,w/2
+
+        b, c, h, w = probs.size(0), probs.size(1), probs.size(2), probs.size(3)
+        probs = probs.view(b, c, -1)
+        feats = feats.view(b, feats.size(1), -1)
+        feats = feats.permute(0, 2, 1)  # b*hw/4*64
+        probs = F.softmax(probs, dim=2)  # b*21*hw/4
+        ocr_context = torch.matmul(probs, feats).permute(0, 2, 1).unsqueeze(3)  # b*64*21*1
+        return ocr_context
+
+
+class ObjectAttentionBlock2D(nn.Module):
+    def __init__(self, in_channels, key_channels):
+        super(ObjectAttentionBlock2D, self).__init__()
+        self.in_channels = in_channels
+        self.key_channels = key_channels
+        self.f_pixel = nn.Sequential(
+            nn.Conv2d(in_channels=self.in_channels, out_channels=self.key_channels,
+                      kernel_size=1, stride=1, padding=0, bias=False),
+            nn.GroupNorm(1, self.key_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=self.key_channels, out_channels=self.key_channels,
+                      kernel_size=1, stride=1, padding=0, bias=False),
+            nn.GroupNorm(1, self.key_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.f_object = nn.Sequential(
+            nn.Conv2d(in_channels=self.in_channels, out_channels=self.key_channels,
+                      kernel_size=1, stride=1, padding=0, bias=False),
+            nn.GroupNorm(1, self.key_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=self.key_channels, out_channels=self.key_channels,
+                      kernel_size=1, stride=1, padding=0, bias=False),
+            nn.GroupNorm(1, self.key_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.f_down = nn.Sequential(
+            nn.Conv2d(in_channels=self.in_channels, out_channels=self.key_channels,
+                      kernel_size=1, stride=1, padding=0, bias=False),
+            nn.GroupNorm(1, self.key_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.f_up = nn.Sequential(
+            nn.Conv2d(in_channels=self.key_channels, out_channels=self.in_channels,
+                      kernel_size=1, stride=1, padding=0, bias=False),
+            nn.GroupNorm(1, self.in_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x, proxy):
+        # x 64*h/2*w/2
+        # proxy 64*21*1
+        b, h, w = x.size(0), x.size(2), x.size(3)
+        query = self.f_pixel(x).view(b, self.key_channels, -1)  # b*32*hw/4
+        query = query.permute(0, 2, 1)  # b*hw/4*32
+        key = self.f_object(proxy).view(b, self.key_channels, -1)  # b*32*21
+        value = self.f_down(proxy).view(b, self.key_channels, -1)
+        value = value.permute(0, 2, 1)  # b*21*32
+
+        sim_map = torch.matmul(query, key)  # b*hw/4*21
+        sim_map = (self.key_channels ** -.5) * sim_map
+        sim_map = F.softmax(sim_map, dim=-1)
+
+        # add bg context ...
+        context = torch.matmul(sim_map, value)  # b*hw/4*32
+        context = context.permute(0, 2, 1).contiguous()  # b*32*hw/4
+        context = context.view(b, self.key_channels, *x.size()[2:])  # b*32*h/2*w/2
+        context = self.f_up(context)  # b*64*h/2*w/2
+
+        return context
+
+
+class SpatialOCR_Module(nn.Module):
+    def __init__(self, in_channels, key_channels, out_channels, dropout=0.1):
+        super(SpatialOCR_Module, self).__init__()
+        self.object_context_block = ObjectAttentionBlock2D(in_channels, key_channels)
+
+        _in_channels = 2 * in_channels
+
+        self.conv_bn_dropout = nn.Sequential(
+            nn.Conv2d(_in_channels, out_channels, kernel_size=1, padding=0, bias=False),
+            nn.GroupNorm(1, out_channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(dropout)
+        )
+
+    def forward(self, feats, proxy_feats):
+        # feats 64*h/2*w/2
+        # proxy_feats 64*21*1
+        context = self.object_context_block(feats, proxy_feats)  # b*64*h/2*w/2
+
+        output = self.conv_bn_dropout(torch.cat([context, feats], 1))  # b*64*h/2*w/2
+
+        return output
+
+#增强特征表示
+class Ocr(nn.Module):
+    def __init__(self, in_channels=64, num_class=21):
+        super(Ocr, self).__init__()
+        # self.conv3x3_ocr = nn.Sequential(
+        #     nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1, bias=False),
+        #     nn.GroupNorm(1, in_channels),
+        #     nn.ReLU(inplace=True)
+        # )
+        self.ocr_gather_head = SpatialGather_Module(cls_num=num_class)
+        self.ocr_distri_head = SpatialOCR_Module(in_channels=in_channels,
+                                                 key_channels=int(in_channels / 2),
+                                                 out_channels=in_channels,
+                                                 dropout=0.05
+                                                 )
+
+    def forward(self, feats, out_aux):
+        # feats 64*h/2*w/2
+        # out_aux 21*h*w
+        # feats = self.conv3x3_ocr(feats)  # 64*h/2*w/2
+        context = self.ocr_gather_head(feats, out_aux)  # 64*21*1
+        feats = self.ocr_distri_head(feats, context)  # 512*h/2*w/2
+
+        return feats
+
+
+class FuseGFF(nn.Module):
+    def __init__(self, in_channels=64, out_channels=64):
+        super(FuseGFF, self).__init__()
+        self.FG = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(1, out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(1, out_channels),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, input):
+        output = self.FG(input)
+        return output
+
+
 
 
 class LDC_side_lifting(nn.Module):
     """ Definition of the DXtrem network. """
 
-    def __init__(self):
+    def __init__(self,nclasses=1,inter_channel=16):
         super(LDC_side_lifting, self).__init__()
+        self.nclasses = nclasses
+        feat_chans = [16, 32, 64, 96]
+        self.inter_channels = inter_channel
+        self.down5 = nn.Conv2d(feat_chans[-1], self.inter_channels, kernel_size=1, stride=1, bias=False)
+        self.down4 = nn.Conv2d(feat_chans[-2], self.inter_channels, kernel_size=1, stride=1, bias=False)
+        self.down3 = nn.Conv2d(feat_chans[-3], self.inter_channels, kernel_size=1, stride=1, bias=False)
+        self.down22 = nn.Conv2d(feat_chans[-4], self.inter_channels, kernel_size=1, stride=1, bias=False)
+        self.adjust = nn.Conv2d(in_channels=1, out_channels=16, kernel_size=1)
+        # 特征融合前增强各层级的特征表示
+        self.FuseGFF2 = FuseGFF(in_channels=self.inter_channels, out_channels=self.inter_channels)
+        self.FuseGFF3 = FuseGFF(in_channels=self.inter_channels, out_channels=self.inter_channels)
+        self.FuseGFF4 = FuseGFF(in_channels=self.inter_channels, out_channels=self.inter_channels)
+        self.FuseGFF5 = FuseGFF(in_channels=self.inter_channels, out_channels=self.inter_channels)
+
+        self.FuseGFF2_2 = FuseGFF(in_channels=self.inter_channels, out_channels=self.inter_channels)
+        self.FuseGFF3_2 = FuseGFF(in_channels=self.inter_channels, out_channels=self.inter_channels)
+        self.FuseGFF4_2 = FuseGFF(in_channels=self.inter_channels, out_channels=self.inter_channels)
+        self.FuseGFF5_2 = FuseGFF(in_channels=self.inter_channels, out_channels=self.inter_channels)
+
+        self.FuseGFFC1 = nn.Conv2d(in_channels=feat_chans[0], out_channels=feat_chans[0], kernel_size=1, stride=1, bias=False)
+        self.FuseGFFC2 = nn.Conv2d(in_channels=feat_chans[1], out_channels=feat_chans[1], kernel_size=1, stride=1, bias=False)
+        self.FuseGFFC3 = nn.Conv2d(in_channels=feat_chans[2], out_channels=feat_chans[2], kernel_size=1, stride=1, bias=False)
+        self.FuseGFFC4 = nn.Conv2d(in_channels=feat_chans[3], out_channels=feat_chans[3], kernel_size=1, stride=1, bias=False)
+        # 全局上下文特征提取
+        self.global_context = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(feat_chans[-1], self.inter_channels, kernel_size=1, stride=1, bias=False),
+            nn.GroupNorm(1, self.inter_channels),
+            nn.ReLU(inplace=True)
+        )
+
         self.block_1 = DoubleConvBlock(3, 16, 16, stride=2,)
         self.block_2 = DoubleConvBlock(16, 32, use_act=False)
         self.dblock_3 = _DenseBlock(2, 32, 64) # [128,256,100,100]
@@ -263,8 +447,12 @@ class LDC_side_lifting(nn.Module):
         # self.block_cat = SingleConvBlock(4, 1, stride=1, use_bs=False) # hed fusion method
         self.block_cat = DoubleFusion(4,4)# cats fusion method
 
-
         self.apply(weight_init)
+
+        self.head = nn.Conv2d(self.inter_channels, self.nclasses, kernel_size=1, stride=1)
+        self.seg_head = nn.Conv2d(self.inter_channels * 2, self.nclasses + 1, kernel_size=1, stride=1)
+        self.ocr = Ocr(in_channels=self.inter_channels, num_class=self.nclasses + 1)  # 增强特征表示
+        self.edge_head = nn.Conv2d(self.inter_channels * 2, 1, kernel_size=1, stride=1)
 
     def slice(self, tensor, slice_shape):
         t_shape = tensor.shape
@@ -279,9 +467,10 @@ class LDC_side_lifting(nn.Module):
 
     def forward(self, x):
         assert x.ndim == 4, x.shape
+        n, c, h, w = x.shape
          # supose the image size is 352x352
         # Block 1
-        block_1 = self.block_1(x) # [8,16,176,176]
+        block_1 = self.block_1(x) # [8,16,176,176] 1/2
         # block_1_side = self.side_1(block_1) # 16 [8,32,88,88]
 
         block_1_side = self.side_haar1(block_1) # 16 [8,32,88,88]
@@ -289,7 +478,7 @@ class LDC_side_lifting(nn.Module):
         # Block 2
         block_2 = self.block_2(block_1) # 32 # [8,32,176,176]
         # block_2_down = self.maxpool(block_2) # [8,32,88,88]
-        block_2 = self.CA1(block_2)
+        block_2 = self.CA1(block_2)#1/2
         block_2_14 = self.down1(block_2)
         (c1, d1, LL1, LH1, HL1, HH1) = self.wavelet1(block_2_14)
         block_2_down = torch.cat([HH1, HL1, LH1, LL1], dim=1)
@@ -305,7 +494,7 @@ class LDC_side_lifting(nn.Module):
         block_3_pre_dense = self.pre_dense_3(block_2_down) # [8,64,88,88] block 3 L connection
         block_3, _ = self.dblock_3([block_2_add, block_3_pre_dense]) # [8,64,88,88]
         # block_3_down = self.maxpool(block_3) # [8,64,44,44]
-        block_3 = self.CA2(block_3)
+        block_3 = self.CA2(block_3)#1/4
         block_3_14 = self.down2(block_3)
         (c2, d2, LL2, LH2, HL2, HH2) = self.wavelet2(block_3_14)
         block_3_down = torch.cat([HH2, HL2, LH2, LL2], dim=1)
@@ -318,7 +507,50 @@ class LDC_side_lifting(nn.Module):
         # Block 4
         block_2_resize_half = self.pre_dense_2(block_2_down) # [8,64,44,44]
         block_4_pre_dense = self.pre_dense_4(block_3_down+block_2_resize_half) # [8,96,44,44]
-        block_4, _ = self.dblock_4([block_3_add, block_4_pre_dense]) # [8,96,44,44]
+        block_4, _ = self.dblock_4([block_3_add, block_4_pre_dense]) # [8,96,44,44] 1/8
+
+        side2 = self.down22(block_1)  # 64,1/2
+        side3 = self.down3(block_2)  # 64,1/2
+        side4 = self.down4(block_3)  # 64,1/4
+        side5 = self.down5(block_4)  # 64,1/8
+
+        g2 = torch.sigmoid(side2)
+        g3 = torch.sigmoid(side3)
+        g4 = torch.sigmoid(side4)
+        g5 = torch.sigmoid(side5)
+
+        gs2 = F.interpolate(g2 * side2, size=side3.shape[-2:], mode='bilinear', align_corners=True)  # 64,1/2
+        gs3 = F.interpolate(g3 * side3, size=side2.shape[-2:], mode='bilinear', align_corners=True)  # 64,1/2
+        gs4 = F.interpolate(g4 * side4, size=side5.shape[-2:], mode='bilinear', align_corners=True)  # 64,1/8
+        gs5 = F.interpolate(g5 * side5, size=side4.shape[-2:], mode='bilinear', align_corners=True)  # 64,1/4
+
+        side5gff = (1 + g5) * side5 + (1 - g5) * gs4  # 64,1/8
+        side4gff = (1 + g4) * side4 + (1 - g4) * gs5  # 64,1/4
+        side3gff = (1 + g3) * side3 + (1 - g3) * gs2  # 64,1/2
+        side2gff = (1 + g2) * side2 + (1 - g2) * gs3  # 64,1/2
+
+        side5gff = self.FuseGFF5(side5gff)  # 64,1/8
+        side4gff = self.FuseGFF4(side4gff)  # 64,1/4
+        side3gff = self.FuseGFF3(side3gff)  # 64,1/2
+        side2gff = self.FuseGFF2(side2gff)  # 64,1/2
+
+        side5gff = F.interpolate(side5gff, size=side4gff.shape[-2:], mode='bilinear', align_corners=True)
+        seg = torch.cat([side5gff, side4gff], dim=1)
+        seg = self.seg_head(seg)
+        seg = F.interpolate(seg, size=(h, w), mode='bilinear', align_corners=True)
+
+
+        # side5gff_2 = self.FuseGFF5_2(side5gff)  # 64,1/8
+        # side4gff_2 = self.FuseGFF4_2(side4gff)  # 64,1/4
+        # side3gff_2 = self.FuseGFF3_2(side3gff)  # 64,1/2
+        # side2gff_2 = self.FuseGFF2_2(side2gff)  # 64,1/2
+        # global_context = self.global_context(block_4)  # 64,1*1
+        # global_context = F.interpolate(global_context, size=side5gff_2.size()[2:], mode='bilinear',
+        #                                align_corners=True)  # 64,1/8
+
+
+
+
 
 
         # upsampling blocks
@@ -328,23 +560,38 @@ class LDC_side_lifting(nn.Module):
         out_4 = self.up_block_4(block_4)
         # results = [out_1, out_2, out_3, out_4, out_5, out_6]
         results = [out_1, out_2, out_3, out_4]
-        pre = [block_1, block_3, block_4]
-        clrcle_model = CustomDetect(nc=1, ch=[16, 64, 96]).to(x.device)
-        clrcle_results = clrcle_model(pre)
+
 
         # 将results中的每个结果保存为图像
         # concatenate multiscale outputs
         block_cat = torch.cat(results, dim=1)  # Bx4xHxW
         block_cat = self.block_cat(block_cat)  # Bx1xHxW
+        block_cat = self.adjust(block_cat)
+
 
         # return results
-        results.append(block_cat)
+
+
+        sum_23 = self.ocr(block_cat, seg)
+        final_feature = self.head(sum_23)  # 1,1/2
+        sedge = F.interpolate(final_feature, size=(h, w), mode='bilinear', align_corners=True)
+        results.append(sedge)
+
+
+        circle1 = self.FuseGFFC1(block_1)
+        #circle2 = self.FuseGFFC2(block_2)
+        circle3 = self.FuseGFFC3(block_3)
+        circle4 = self.FuseGFFC4(block_4)
+        pre = [circle1, circle3, circle4]
+        clrcle_model = CustomDetect(nc=1, ch=[16, 64, 96]).to(x.device)
+        clrcle_results = clrcle_model(pre)
+
         return results ,clrcle_results
 
 
 
 class CustomDetect(nn.Module):
-    def __init__(self, nc=1, ch=()):
+    def __init__(self, nc=1, ch=(16, 64, 96)):
         super().__init__()
         self.nc = nc  # 类别数: 80
         self.no = 2  # 你的特有偏移量: 2 (例如 dx, dy 或者 r, offset)
@@ -360,10 +607,10 @@ class CustomDetect(nn.Module):
         for x in ch:
             # 1. 回归分支: 输入通道 -> 2个输出通道
             # 这里使用 1x1 卷积直接映射，也可以先加 3x3 卷积增加非线性
-            self.cv2.append(nn.Conv2d(x, self.no, 1))
+            self.cv2.append(nn.Conv2d(x, self.no, kernel_size=1, stride=1))
 
             # 2. 分类分支: 输入通道 -> 80个输出通道
-            self.cv3.append(nn.Conv2d(x, self.nc, 1))
+            self.cv3.append(nn.Conv2d(x, self.nc, kernel_size=1, stride=1))
 
     def forward(self, x):
         """
@@ -374,23 +621,24 @@ class CustomDetect(nn.Module):
         """
         res = []
         for i in range(len(x)):
-            # 1. 计算分类分支 (B, 80, H, W)
+            # 1. 计算分类分支 (B, 1, H, W)
             cls_out = self.cv3[i](x[i])
+            #cls_out = self.sigmoid(cls_out)
 
             # 2. 计算回归分支 (B, 2, H, W)
             reg_out = self.cv2[i](x[i])
-            reg_out = self.sigmoid(reg_out)
+            #reg_out = self.sigmoid(reg_out)
 
-            # 3. 拼接 (Concatenate) -> (B, 80+2, H, W)
+            # 3. 拼接 (Concatenate) -> (B, 1+2, H, W)
             # dim=1 代表在通道维度拼接
             out = torch.cat((cls_out, reg_out), 1)
 
             res.append(out)
 
         # 此时 res 包含了三个张量，形状完全符合你的要求：
-        # res[0]: (8, 82, 600, 800)
-        # res[1]: (8, 82, 300, 400)
-        # res[2]: (8, 82, 150, 200)
+        # res[0]: (8, 3, 600, 800)
+        # res[1]: (8, 3, 300, 400)
+        # res[2]: (8, 3, 150, 200)
         return res
 
 
@@ -408,9 +656,9 @@ class PostProcess:
     def __call__(self, preds):
         """
         preds: 列表，包含三个 tensor
-               Scale 0: (B, 82, 600, 800)
-               Scale 1: (B, 82, 300, 400)
-               Scale 2: (B, 82, 150, 200)
+               Scale 0: (B, 3, 600, 800)
+               Scale 1: (B, 3, 300, 400)
+               Scale 2: (B, 3, 150, 200)
         """
         # 1. 初始化一个列表，长度为 Batch_Size，用来存放每张图的结果
         batch_size = preds[0].shape[0]
@@ -420,13 +668,11 @@ class PostProcess:
         for i, pred in enumerate(preds):
             stride = self.strides[i]
             B, C, H, W = pred.shape
-            # 1. 维度变换: (B, 82, H, W) -> (B, H, W, 82)
+            # 1. 维度变换: (B, 3, H, W) -> (B, H, W, 3)
             pred1 = pred.permute(0, 2, 3, 1)
-            # 2. 分割通道: 前80是类别，后2是偏移量
-            cls_logits = pred1[..., :self.num_classes]
+            # 2. 分割通道: 前1是类别，后2是偏移量
+            scores = pred1[..., :self.num_classes].sigmoid()
             offsets = pred1[..., self.num_classes:]
-            # 3. 计算置信度 (Sigmoid)
-            scores = cls_logits.sigmoid()
             anchor_points, stride_tensor = make_anchor(pred, stride, 0.5)
             yoloCircleLoss = YoloCircleLoss()
             pred_circles = yoloCircleLoss.clrcle_decode(anchor_points, offsets.reshape(B, -1, 2), stride_tensor).reshape(B, H, W, 3)
@@ -522,7 +768,7 @@ def final_results(PostProcess,output):
     postprocessor = PostProcess()
     detections = postprocessor(output)
     for img_dets in detections:
-        # img_dets: (Total_N, 4)
+        # img_dets: (Total_N, 5)
         if img_dets.shape[0] == 0:
             final_results.append(img_dets)
             continue
@@ -531,7 +777,7 @@ def final_results(PostProcess,output):
         # 输入: (Total_N, 5) -> 输出: (Keep_N, 5)
         keep_dets = standard_nms_with_fixed_size(img_dets, fixed_size=20,iou_thres=0.95)
         final_results.append(keep_dets)
-        return final_results
+    return final_results
 
 
 

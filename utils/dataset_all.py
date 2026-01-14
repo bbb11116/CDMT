@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 import json
-from utils.circle_dataset import *
+#from utils.circle_dataset import *
 BIPED_mean = [114.510, 114.451, 117.230, 137.86]
 
 
@@ -140,9 +140,12 @@ class TestDataset(Dataset):
 
         # 记录原始尺寸
         im_shape = [image.shape[0], image.shape[1]]
+        seg_label = cv2.imread(label_path.replace('\\test\\', '\\test_mask\\'), 0)
+        seg_label = (seg_label > 0).astype(np.uint8)
+
 
         # 应用变换
-        image, label = self.transform(img=image, gt=label)
+        image, label, seg_label = self.transform(img=image, gt=label, seg_gt=seg_label)
 
         return dict(
             images=image,
@@ -152,10 +155,11 @@ class TestDataset(Dataset):
             image_shape=im_shape,
             shape=shape,
             circles=circles,
-            cls=cls
+            cls=cls,
+            seg_labels=seg_label
         )
 
-    def transform(self, img, gt):
+    def transform(self, img, gt, seg_gt):
         # CLASSIC 模式处理
         if self.test_data == "CLASSIC":
             # 静默调整尺寸（不打印）
@@ -197,7 +201,8 @@ class TestDataset(Dataset):
             # 创建空标签
             gt = torch.zeros(1, img.shape[1], img.shape[2])
 
-        return img, gt
+        seg_gt = torch.from_numpy(seg_gt).long()
+        return img, gt, seg_gt
 
 
 class BipedDataset(Dataset):
@@ -320,12 +325,14 @@ class BipedDataset(Dataset):
         # load data
         image = cv2.imread(image_path, cv2.IMREAD_COLOR)
         label = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
+        seg_label = cv2.imread(label_path.replace('real', 'mask'), 0)
+        seg_label = (seg_label > 0).astype(np.uint8)
 
 
-        image, label = self.transform(img=image, gt=label)
-        return dict(file_names=file_name,im_file=file_name, shape=shape, images=image, labels=label, circles=circles, cls=cls)
+        image, label, seg_label = self.transform(img=image, gt=label, seg_gt=seg_label)
+        return dict(file_names=file_name,im_file=file_name, shape=shape, images=image, labels=label, circles=circles, cls=cls, seg_labels=seg_label)
 
-    def transform(self, img, gt):
+    def transform(self, img, gt, seg_gt):
         gt = np.array(gt, dtype=np.float32)
         if len(gt.shape) == 3:
             gt = gt[:, :, 0]
@@ -385,9 +392,70 @@ class BipedDataset(Dataset):
         img = img.transpose((2, 0, 1))
         img = torch.from_numpy(img.copy()).float()
         gt = torch.from_numpy(np.array([gt])).float()
+        seg_gt = torch.from_numpy(seg_gt).long()
 
         # _, i_h, i_w = img.shape
         # if i_h != self.img_height or i_w != self.img_width:
         #     img = self.transforms(img)
         #     gt = self.transforms(gt)
-        return img, gt
+        return img, gt, seg_gt
+
+
+
+def custom_collate_fn(batch):
+    """
+    自定义整理函数，将多个样本的数据整合成你需要的 batch 字典格式
+    """
+    im_file_list = []
+    shape_list = []
+    images_list = []
+    labels_list = []
+    seg_labels_list = []  # ← 新增：收集 seg_labels
+
+    batch_idx_list = []
+    cls_list = []
+    circles_list = []
+
+    for i, item in enumerate(batch):
+        # 收集通用字段
+        im_file_list.append(item['im_file'])
+        shape_list.append(item['shape'])
+        images_list.append(item['images'])
+        labels_list.append(item['labels'])
+        seg_labels_list.append(item['seg_labels'])
+
+        # 处理 circles 相关
+        num_circles = item['circles'].shape[0]
+        if num_circles > 0:
+            b_idx = torch.full((num_circles, 1), i, dtype=torch.float32)
+            batch_idx_list.append(b_idx)
+            cls_list.append(item['cls'])
+            circles_list.append(item['circles'])
+
+    # 堆叠 tensors
+    images_tensor = torch.stack(images_list, dim=0)
+    labels_tensor = torch.stack(labels_list, dim=0)
+    seg_labels_tensor = torch.stack(seg_labels_list, dim=0)
+
+    # 处理 circles 部分
+    if len(batch_idx_list) > 0:
+        batch_idx_tensor = torch.cat(batch_idx_list, dim=0)
+        cls_tensor = torch.cat(cls_list, dim=0)
+        circles_tensor = torch.cat(circles_list, dim=0)
+    else:
+        batch_idx_tensor = torch.zeros((0, 1))
+        cls_tensor = torch.zeros((0, 1))
+        circles_tensor = torch.zeros((0, 3))
+
+    shapes_tensor = torch.stack(shape_list, dim=0)
+
+    return {
+        "batch_idx": batch_idx_tensor,
+        "cls": cls_tensor,
+        "circles": circles_tensor,
+        "im_file": im_file_list,
+        "shape": shapes_tensor,
+        "images": images_tensor,
+        "labels": labels_tensor,
+        "seg_labels": seg_labels_tensor,
+    }

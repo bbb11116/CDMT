@@ -1,9 +1,6 @@
 from __future__ import print_function
 import os
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-
-
-
 import argparse
 import cv2
 import numpy as np
@@ -15,7 +12,7 @@ from torch.utils.data import DataLoader
 #from model.mydateset import YSDataset, YSTestDataset
 #from utils.dataset import *
 from utils.dataset_all import *
-from utils.circle_dataset import *
+#from utils.circle_dataset import *
 from utils.loss2 import *
 from model.model import LDC_side_lifting
 from utils.img_processing import (save_image_batch_to_disk,
@@ -42,23 +39,18 @@ def train_one_epoch(epoch, dataloader, model, criterions, optimizer, device,
     for batch_id, sample_batched in enumerate(dataloader):
         images = sample_batched['images'].to(device)  # BxCxHxW   图像信息
         labels = sample_batched['labels'].to(device)  # BxHxW  labels信息
+        seg_labels = sample_batched['seg_labels'].to(device)
 
-        preds_list,circle_list = model(images)
+        preds_list,circle_list,seg = model(images)
         assert len(preds_list) == len(l_weight), "长度不匹配"
 
         loss_4 = sum([criterion4(preds, labels, l_w) for preds, l_w in zip(preds_list, l_weight0)])  # bdcn_loss2 [1,2,3] TEED
         loss_1 = criterion1(preds_list[-1], labels, l_weight[-1], device)  # cats_loss [dfuse] TEED
+        loss_3 = criterion3(seg, seg_labels, l_weight0[-1], device)
         loss_5 = criterion5(preds = circle_list, batch = sample_batched)[0] # yolo_circleLoss [dfuse] TEED
         loss_5 = loss_5.mean()*0.0000001  # 或 .sum()
-
-
-
-        # loss = sum([criterion2(preds, labels,l_w) for preds, l_w in zip(preds_list[:-1],l_weight0)]) # bdcn_loss2
-        #loss_1 = sum([criterion1(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight)])  # cats_loss   计算损失
-        #loss_3 = sum([criterion2(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight0)])
         loss_2 = criterion2(preds_list[-1], labels, l_weight0[-1], device)
-        #loss_4 = sum([criterion3(preds, labels, lweight = l_w) for preds, l_w in zip(preds_list, l_weight0)])
-        loss = loss_1 + loss_4 * 2 + loss_2*0.25 + loss_5 * 2
+        loss = loss_1 + loss_4 * 2 + loss_2*0.2 + loss_5 * 2 + loss_3 * 0.09
 
 
         optimizer.zero_grad()   # 将梯度归零
@@ -131,20 +123,17 @@ def validate_one_epoch(criterions, dataloader, model, device, output_dir, arg=No
         for _, sample_batched in enumerate(dataloader):
             images = sample_batched['images'].to(device)
             labels = sample_batched['labels'].to(device)
+            seg_labels = sample_batched['seg_labels'].to(device)
             file_names = sample_batched['im_file']
             image_shape = sample_batched['shape']
-            preds_list,circle_list = model(images)
+            preds_list,circle_list , seg = model(images)
             loss_4 = sum([criterion4(preds, labels, l_w) for preds, l_w in zip(preds_list, l_weight0)])  # bdcn_loss2 [1,2,3] TEED
             loss_1 = criterion1(preds_list[-1], labels, l_weight[-1], device)  # cats_loss [dfuse] TEED
+            loss_3 = criterion3(seg, seg_labels, l_weight0[-1], device)
             loss_5 = criterion5(preds = circle_list, batch = sample_batched)[0]
             loss_5 = loss_5.mean()*0.0000001
-
-            # loss = sum([criterion2(preds, labels,l_w) for preds, l_w in zip(preds_list[:-1],l_weight0)]) # bdcn_loss2
-            # loss_1 = sum([criterion1(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight)])  # cats_loss   计算损失
-            # loss_3 = sum([criterion2(preds, labels, l_w, device) for preds, l_w in zip(preds_list, l_weight0)])
             loss_2 = criterion2(preds_list[-1], labels, l_weight0[-1], device)
-            # loss_4 = sum([criterion3(preds, labels, lweight = l_w) for preds, l_w in zip(preds_list, l_weight0)])
-            loss =loss_1  +   loss_4  + loss_2*0.25 + loss_5 * 2
+            loss =loss_1  +   loss_4  + loss_2*0.2 + loss_5 * 2 + loss_3 * 0.09
             val_loss_avg.append(loss.item())
             # print('pred shape', preds[0].shape)
             # 将预测的结果图像存储到对应的文件中
@@ -263,7 +252,7 @@ def parse_args():
                         help='the path to the json file.')
     parser.add_argument('--output_dir',    #训练结果路径
                         type=str,
-                        default='checkpoints/checkpoints_circle_3',
+                        default='checkpoints/checkpoints_circle_1',
                         help='the path to output the results.')
     parser.add_argument('--train_data',
                         type=str,
@@ -470,13 +459,7 @@ def main(args):
 
     criterion1 = cats_loss #bdcn_loss2
     criterion2 = Dice_loss#cats_loss#f1_accuracy2
-    criterion3 = HybridLoss(
-        max_epochs=args.epochs,
-        scheduler_type='cosine',
-        hard_threshold=(0.3, 0.7),
-        hard_weight=3.0,
-        hard_gamma=2.0
-    )
+    criterion3 = seg_diceloss
     criterion5 = YoloCircleLoss()
     criterion4 = bdcn_loss2
     criterion = [criterion1, criterion2, criterion3, criterion4,criterion5]

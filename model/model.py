@@ -47,31 +47,6 @@ def weight_init(m):
         if m.bias is not None:
             torch.nn.init.zeros_(m.bias)
 
-class CoFusion(nn.Module):
-
-    def __init__(self, in_ch, out_ch):
-        super(CoFusion, self).__init__()
-        self.conv1 = nn.Conv2d(in_ch, 32, kernel_size=3,
-                               stride=1, padding=1) # before 64
-        self.conv3= nn.Conv2d(32, out_ch, kernel_size=3,
-                               stride=1, padding=1)# before 64  instead of 32
-        self.relu = nn.ReLU()
-        self.norm_layer1 = nn.GroupNorm(4, 32) # before 64
-
-    def forward(self, x):
-        # fusecat = torch.cat(x, dim=1)
-        attn = self.relu(self.norm_layer1(self.conv1(x)))
-        attn = F.softmax(self.conv3(attn), dim=1)
-
-        # 按照通道数将attn分割，并保存为图像
-        # for i in range(attn.shape[1]):
-        #     attn_slice = attn[0, i, :, :]
-        #     attn_slice = attn_slice.cpu().detach().numpy()
-        #     attn_slice = np.array(attn_slice * 255, dtype=np.uint8)
-        #     cv2.imwrite(f'./attn_{i}.png', attn_slice)
-
-
-        return ((x * attn).sum(1)).unsqueeze(1)
 
 
 class DoubleFusion(nn.Module):
@@ -95,6 +70,98 @@ class DoubleFusion(nn.Module):
         attn2 = self.PSconv1(self.DWconv2(self.AF(attn))) # #TEED best res TEDv14[8, 3, 352, 352]
 
         return Fsmish(((attn2 +attn).sum(1)).unsqueeze(1)) #TED best res
+
+
+
+def smish(x):
+    """Smish activation: x * tanh(log(1 + sigmoid(x)))"""
+    return x * torch.tanh(torch.log(1 + torch.sigmoid(x)))
+
+
+class Smish(nn.Module):
+    def forward(self, x):
+        return smish(x)
+
+
+class EnhancedDoubleFusion(nn.Module):
+    """
+    Enhanced version of DoubleFusion for edge detection.
+
+    Features:
+      - Supports arbitrary input channels
+      - Optional normalization (GroupNorm recommended for small batch)
+      - Optional upscale via PixelShuffle (e.g., r=2 for 2x upsample)
+      - Clean, modular, and efficient
+    """
+
+    def __init__(
+            self,
+            in_ch: int,
+            out_ch: int = 1,
+            mid_factor: int = 8,  # expansion factor (was fixed to 8)
+            use_norm: bool = True,  # add GroupNorm after conv
+            norm_groups: int = 8,  # groups for GroupNorm
+            upscale_factor: int = 1,  # set >1 to upsample (e.g., 2)
+            activation: nn.Module = Smish()
+    ):
+        super().__init__()
+        self.out_ch = out_ch
+        self.upscale_factor = upscale_factor
+
+        mid_ch = in_ch * mid_factor
+
+        # First depthwise block
+        self.block1 = self._make_dw_block(in_ch, mid_ch, use_norm, norm_groups, activation)
+
+        # Second depthwise block
+        self.block2 = self._make_dw_block(mid_ch, mid_ch, use_norm, norm_groups, activation)
+
+        # Final projection to out_ch (usually 1 for edge map)
+        final_in_ch = mid_ch
+        if upscale_factor > 1:
+            # PixelShuffle reduces channels by r^2, so we need to expand first
+            final_in_ch = mid_ch * (upscale_factor ** 2)
+            self.pre_shuffle = nn.Conv2d(mid_ch, final_in_ch, 1)
+            self.pixel_shuffle = nn.PixelShuffle(upscale_factor)
+        else:
+            self.pre_shuffle = None
+            self.pixel_shuffle = None
+
+        self.final_conv = nn.Conv2d(final_in_ch // (upscale_factor ** 2) if upscale_factor > 1 else mid_ch,
+                                    out_ch, kernel_size=1)
+
+        self.final_act = activation
+
+    def _make_dw_block(self, in_c, out_c, use_norm, norm_groups, act):
+        layers = [
+            nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, groups=in_c),
+        ]
+        if use_norm:
+            # Use GroupNorm (more stable than BN for small batches or variable input sizes)
+            groups = min(norm_groups, out_c)
+            layers.append(nn.GroupNorm(groups, out_c))
+        layers.append(act)
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        # First path
+        feat1 = self.block1(x)  # [B, mid_ch, H, W]
+        feat2 = self.block2(feat1)  # [B, mid_ch, H, W]
+
+        # Fuse: element-wise sum
+        fused = feat1 + feat2  # [B, mid_ch, H, W]
+
+        # Optional upsample
+        if self.upscale_factor > 1:
+            fused = self.pre_shuffle(fused)  # [B, mid_ch * r^2, H, W]
+            fused = self.pixel_shuffle(fused)  # [B, mid_ch, H*r, W*r]
+
+        # Project to output channels
+        out = self.final_conv(fused)  # [B, out_ch, H', W']
+        out = self.final_act(out)
+        return out
+
+
 
 class _DenseLayer(nn.Sequential):
     def __init__(self, input_features, out_features):
@@ -586,7 +653,7 @@ class LDC_side_lifting(nn.Module):
         clrcle_model = CustomDetect(nc=1, ch=[16, 64, 96]).to(x.device)
         clrcle_results = clrcle_model(pre)
 
-        return results ,clrcle_results
+        return results , clrcle_results , seg
 
 
 

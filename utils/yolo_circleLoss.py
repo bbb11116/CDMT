@@ -76,7 +76,6 @@ class YoloCircleLoss(nn.Module):
 
         # Targets [这一个批次一共有多少个框，1+1+3]
         targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["circles"]), 1)
-        print(targets.shape)
         targets = self.preprocess(targets, batch_size, scale_tensor=imgsz[[1, 0, 1, 0]]) # (8, max_objects, 4)
         gt_labels, gt_circles = targets.split((1, 3), 2)  # cls, xyr # (8, max_objects, 1), (8, max_objects, 3)
         mask_gt = gt_circles.sum(2, keepdim=True).gt_(0.0)
@@ -138,7 +137,7 @@ class CircleLoss(nn.Module):
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
         iou = circle_ious(pred_bboxes[fg_mask], target_bboxes[fg_mask])
         distence = center_distanceLoss(pred_bboxes[fg_mask], target_bboxes[fg_mask])
-        loss_iou = 1.0 - iou
-        loss_dist = 1.0 - distence
+        loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
+        loss_dist = ((1.0 - distence) * weight).sum() / target_scores_sum
 
         return loss_iou, loss_dist
